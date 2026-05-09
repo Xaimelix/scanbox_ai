@@ -9,6 +9,15 @@ ScanBox AI is a modular 3D digitization project for turning raw capture data int
 - `research-3dgs.md` — 3D Gaussian Splatting research notes
 - `research-lidar-fusion.md` — LiDAR / point cloud fusion research notes
 
+## Quick flow
+```mermaid
+flowchart LR
+    A[Capture RGB + optional LiDAR] --> B[Cloud Processing Layer]
+    B --> C[3DGS / gsplat]
+    C --> D[NeRF if needed]
+    D --> E[Export GLB / USDZ / Viewer]
+```
+
 ## Working principle
 - capture RGB + optional LiDAR / depth data
 - reconstruct with 3DGS as the default MVP path

@@ -18,6 +18,26 @@ The system is organized into five layers:
 
 This separation keeps the MVP small while leaving room for later automation, scaling, and model selection.
 
+#### 2.1 High-level flow
+```mermaid
+flowchart TD
+    A[User / UI] --> B[Control Layer]
+    B --> C[Capture Layer]
+    C --> D[Dataset Builder]
+    D --> E[Cloud Processing Layer]
+    E --> F[Reconstruction Layer]
+    F --> G[Post-processing]
+    G --> H[Product / Export Layer]
+    H --> I[Delivery / Storage]
+
+    C --- C1[RGB Camera]
+    C --- C2[LiDAR / Depth]
+    C --- C3[Turntable / Light Control]
+    F --- F1[Nerfstudio]
+    F --- F2[3DGS / gsplat]
+    F --- F3[NeRF]
+```
+
 ---
 
 ### 3. Component Breakdown
