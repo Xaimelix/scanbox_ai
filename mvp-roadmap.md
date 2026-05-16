@@ -98,16 +98,64 @@ Success criteria:
 ### Phase 5 — Cloud Processing Layer
 Objective: move heavy jobs out of the local machine when needed.
 
+#### Task 5.1 — Virtual Server Provisioning via Intelion Cloud API
+Goal: make the project able to order and manage a temporary virtual server for 3D-model processing.
+
 Deliverables:
-- GPU job submission flow,
+- API client for Intelion Cloud,
+- token-based auth handling,
+- server creation flow,
+- server start / stop / delete actions,
+- preflight status check before launch.
+
+Implementation steps:
+1. Add a small API wrapper around Intelion Cloud endpoints.
+2. Implement authentication with `Authorization: Token <api_key>`.
+3. Create server provisioning from `POST /api/v2/cloud-servers/`.
+4. Add preflight validation with `GET /api/v2/cloud-servers/{id}/status/`.
+5. Implement lifecycle actions with `POST /api/v2/cloud-servers/{id}/actions/`.
+6. Add safe teardown on job completion or failure.
+
+#### Task 5.2 — Processing Job Orchestration
+Goal: connect server lifecycle to the 3D processing pipeline.
+
+Deliverables:
+- job state model,
+- queue or task tracker,
+- dataset upload / handoff step,
 - remote reconstruction execution,
-- job queue or task tracking,
 - result retrieval and packaging.
+
+Implementation steps:
+1. Define a job state machine for cloud processing.
+2. Bind each job to one temporary server instance.
+3. Add dataset transfer and remote execution commands.
+4. Collect outputs back into the local result storage.
+5. Persist job logs and final status for debugging.
+
+#### Task 5.3 — Reliability and Cost Control
+Goal: make cloud processing predictable and safe to use.
+
+Deliverables:
+- retry / timeout policy,
+- orphan server cleanup,
+- budget-aware launch mode,
+- visibility into server status and job progress,
+- basic monitoring and alerts.
+
+Implementation steps:
+1. Add timeout and retry handling for provisioning and processing.
+2. Support the affordable-runtime launch flow when budget is limited.
+3. Clean up abandoned servers after failed jobs.
+4. Surface server and job status in the project UI or logs.
+5. Document operator steps for manual recovery.
 
 Success criteria:
 - larger scenes can be processed without local hardware blocking the pipeline,
 - the same project can run locally or remotely,
-- job status is observable and resumable.
+- the system can automatically request a temporary virtual server, run processing on it, and shut it down when done,
+- server status is observable and resumable,
+- the provisioning flow is safe, repeatable, and tied to the processing job lifecycle.
 
 ### Phase 6 — Operational Hardening
 Objective: make the MVP reliable enough for repeated use.
