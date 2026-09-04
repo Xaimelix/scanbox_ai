@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ScanBox AI — 3D-сканер</title>
+<style>
+  :root { --accent: #00e676; --bg: #0d1117; --card: #161b22; --text: #e6edf3; --muted: #8b949e; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .container { max-width: 720px; margin: 0 auto; padding: 32px 16px; }
+  h1 { font-size: 1.8rem; margin-bottom: 4px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 32px; }
+  .card { background: var(--card); border: 1px solid #30363d; border-radius: 12px; padding: 24px; margin-bottom: 24px; }
+  label { display: block; font-weight: 500; margin-bottom: 8px; }
+  .drop-zone { border: 2px dashed #30363d; border-radius: 10px; padding: 32px; text-align: center; cursor: pointer; transition: border-color .2s, background .2s; }
+  .drop-zone:hover { border-color: var(--accent); background: rgba(0,230,118,0.04); }
+  .drop-zone.dragover { border-color: var(--accent); background: rgba(0,230,118,0.08); }
+  .drop-zone input { display: none; }
+  .drop-zone-text { font-size: 1rem; margin-bottom: 8px; }
+  .drop-zone-hint { font-size: 0.8rem; color: var(--muted); }
+  .drop-zone.has-photo { border-style: solid; }
+  .drop-zone img { max-height: 200px; border-radius: 8px; margin-top: 12px; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 28px; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: opacity .2s; }
+  .btn-primary { background: var(--accent); color: #000; }
+  .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-outline { background: transparent; border: 1px solid #30363d; color: var(--text); }
+  .btn-outline:hover { border-color: var(--accent); }
+  .actions { display: flex; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+  .status-bar { margin-top: 16px; }
+  .status-step { display: flex; align-items: center; gap: 10px; padding: 8px 0; color: var(--muted); font-size: 0.9rem; }
+  .status-step.active { color: var(--text); }
+  .status-step.done { color: var(--accent); }
+  .status-step.failed { color: #f85149; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; background: #30363d; flex-shrink: 0; }
+  .status-step.active .status-dot { background: #ffa657; animation: pulse 1s infinite; }
+  .status-step.done .status-dot { background: var(--accent); }
+  .status-step.failed .status-dot { background: #f85149; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+  .viewer-container { width: 100%; aspect-ratio: 1; background: #0d1117; border-radius: 8px; overflow: hidden; position: relative; }
+  .viewer-container canvas { width: 100% !important; height: 100% !important; }
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .preset-btn { padding: 6px 14px; border: 1px solid #30363d; border-radius: 6px; background: transparent; color: var(--text); cursor: pointer; font-size: 0.85rem; }
+  .preset-btn:hover { border-color: var(--accent); }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 500; background: #21262d; color: var(--muted); margin-left: 8px; }
+  .badge-mock { background: #1f2937; color: #fbbf24; }
+  .error-box { background: rgba(248,81,73,0.1); border: 1px solid #f85149; border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>📷 ScanBox AI</h1>
+  <div class="subtitle">
+    Фото → 3D-модель за минуту
+    <span class="badge" id="mockBadge">mock</span>
+  </div>
+
+  <!-- Загрузка -->
+  <div class="card">
+    <label>Загрузите фото товара</label>
+    <div class="drop-zone" id="dropZone">
+      <div class="drop-zone-text">📸 Нажмите или перетащите фото</div>
+      <div class="drop-zone-hint">JPG, PNG, WebP — до 16 МБ</div>
+      <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp">
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" id="genBtn" disabled>🚀 Сгенерировать</button>
+      <button class="btn btn-outline" id="presetBtn">📦 Пресет</button>
+    </div>
+    <div class="presets" id="presets"></div>
+  </div>
+
+  <!-- Статус -->
+  <div class="card" id="statusCard" style="display:none">
+    <div class="status-bar" id="statusBar">
+      <div class="status-step" data-step="uploaded"><span class="status-dot"></span> Фото загружено</div>
+      <div class="status-step" data-step="provisioning"><span class="status-dot"></span> Аренда GPU-сервера 🚀</div>
+      <div class="status-step" data-step="generating"><span class="status-dot"></span> Генерация 3D-модели ⚙️</div>
+      <div class="status-step" data-step="done"><span class="status-dot"></span> ✅ Модель готова!</div>
+    </div>
+    <div class="error-box" id="errorBox" style="display:none"></div>
+  </div>
+
+  <!-- 3D-просмотр -->
+  <div class="card" id="resultCard" style="display:none">
+    <label>3D-модель</label>
+    <div class="viewer-container" id="viewerContainer"></div>
+    <div class="actions" style="margin-top:12px">
+      <a class="btn btn-outline" id="downloadBtn" download="scanbox_model.glb" style="text-decoration:none">💾 Скачать GLB</a>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// ── DOM refs ──────────────────────────────────────────────────────────
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const genBtn = document.getElementById('genBtn');
+const presetBtn = document.getElementById('presetBtn');
+const presetsEl = document.getElementById('presets');
+const statusCard = document.getElementById('statusCard');
+const statusBar = document.getElementById('statusBar');
+const errorBox = document.getElementById('errorBox');
+const resultCard = document.getElementById('resultCard');
+const viewerContainer = document.getElementById('viewerContainer');
+const downloadBtn = document.getElementById('downloadBtn');
+const mockBadge = document.getElementById('mockBadge');
+
+// ── состояние ─────────────────────────────────────────────────────────
+let selectedFile = null;
+let jobId = null;
+let polling = null;
+let viewer = null;
+let isMock = true;
+
+// ── Three.js viewer ──────────────────────────────────────────────────
+function initViewer(container) {
+  const rect = container.getBoundingClientRect();
+  const w = rect.width || 600, h = rect.height || 600;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0d1117);
+
+  const cam = new THREE.PerspectiveCamera(40, w / h, 0.1, 100);
+  cam.position.set(1.5, 1.5, 2.5);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(w, h);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.2;
+  container.innerHTML = '';
+  container.appendChild(renderer.domElement);
+
+  const controls = new OrbitControls(cam, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 2.5;
+  controls.target.set(0, 0, 0);
+  controls.update();
+
+  // освещение
+  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambient);
+  const key = new THREE.DirectionalLight(0xffffff, 2.0);
+  key.position.set(2, 3, 4);
+  scene.add(key);
+  const fill = new THREE.DirectionalLight(0x4488ff, 0.5);
+  fill.position.set(-2, 1, -2);
+  scene.add(fill);
+  const rim = new THREE.DirectionalLight(0xffffff, 0.8);
+  rim.position.set(0, -1, -3);
+  scene.add(rim);
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, cam);
+  }
+  animate();
+
+  const loader = new GLTFLoader();
+  return { scene, cam, controls, renderer, loader };
+}
+
+function loadModel(viewer, url) {
+  const { scene, controls, loader } = viewer;
+  // удаляем старую модель
+  const old = scene.getObjectByName('scanbox-model');
+  if (old) scene.remove(old);
+
+  loader.load(url, (gltf) => {
+    const model = gltf.scene;
+    model.name = 'scanbox-model';
+    scene.add(model);
+
+    // центрируем
+    const box = new THREE.Box3().setFromObject(model);
+    const center = box.getCenter(new THREE.Vector3());
+    model.position.sub(center);
+
+    // автомасштаб
+    const size = box.getSize(new THREE.Vector3());
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (maxDim > 0 && (maxDim < 0.5 || maxDim > 3)) {
+      const scale = 1.5 / maxDim;
+      model.scale.set(scale, scale, scale);
+    }
+
+    controls.target.set(0, 0, 0);
+    controls.update();
+  }, undefined, (err) => {
+    console.error('GLB load error:', err);
+  });
+}
+
+function resizeViewer(viewer) {
+  const rect = viewerContainer.getBoundingClientRect();
+  const w = rect.width, h = rect.height;
+  viewer.cam.aspect = w / h;
+  viewer.cam.updateProjectionMatrix();
+  viewer.renderer.setSize(w, h);
+}
+
+// ── статус-бар ───────────────────────────────────────────────────────
+function setStep(stepName) {
+  statusBar.querySelectorAll('.status-step').forEach(el => {
+    el.classList.remove('active', 'done', 'failed');
+    if (el.dataset.step === stepName) el.classList.add('active');
+  });
+  // все предыдущие — done
+  let found = false;
+  statusBar.querySelectorAll('.status-step').forEach(el => {
+    if (el.dataset.step === stepName) found = true;
+    else if (!found) el.classList.add('done');
+  });
+}
+
+function setFailed(msg) {
+  statusBar.querySelectorAll('.status-step').forEach(el => el.classList.remove('active'));
+  errorBox.textContent = `❌ ${msg}`;
+  errorBox.style.display = 'block';
+}
+
+// ── API ──────────────────────────────────────────────────────────────
+async function uploadPhoto(file) {
+  const form = new FormData();
+  form.append('file', file);
+  const r = await fetch('/api/upload', { method: 'POST', body: form });
+  if (!r.ok) throw new Error(await r.text());
+  const data = await r.json();
+  isMock = data.mock;
+  mockBadge.textContent = isMock ? 'mock' : 'live';
+  return data;
+}
+
+async function checkStatus(jobId) {
+  const r = await fetch(`/api/status/${jobId}`);
+  if (!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
+
+async function loadPresets() {
+  const r = await fetch('/api/presets');
+  if (!r.ok) return;
+  const data = await r.json();
+  if (data.presets.length === 0) { presetsEl.style.display = 'none'; return; }
+  presetsEl.innerHTML = '';
+  data.presets.forEach(p => {
+    const btn = document.createElement('button');
+    btn.className = 'preset-btn';
+    btn.textContent = p.name;
+    btn.addEventListener('click', () => {
+      // загружаем GLB напрямую
+      statusCard.style.display = 'block';
+      resultCard.style.display = 'block';
+      errorBox.style.display = 'none';
+      if (!viewer) viewer = initViewer(viewerContainer);
+      loadModel(viewer, p.glb);
+      downloadBtn.href = p.glb;
+      downloadBtn.download = `scanbox_${p.name}.glb`;
+      setStep('done');
+    });
+    presetsEl.appendChild(btn);
+  });
+}
+
+// ── события ──────────────────────────────────────────────────────────
+dropZone.addEventListener('click', () => fileInput.click());
+
+dropZone.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropZone.classList.add('dragover');
+});
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) handleFile(fileInput.files[0]);
+});
+
+function handleFile(file) {
+  if (!file.type.startsWith('image/')) return;
+  selectedFile = file;
+  genBtn.disabled = false;
+
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    dropZone.innerHTML = `<img src="${e.target.result}" alt="preview">`;
+    dropZone.classList.add('has-photo');
+  };
+  reader.readAsDataURL(file);
+}
+
+genBtn.addEventListener('click', async () => {
+  if (!selectedFile) return;
+  genBtn.disabled = true;
+  genBtn.textContent = '⏳ Генерация...';
+
+  statusCard.style.display = 'block';
+  resultCard.style.display = 'none';
+  errorBox.style.display = 'none';
+  setStep('uploaded');
+
+  try {
+    const data = await uploadPhoto(selectedFile);
+    jobId = data.job_id;
+    setStep('provisioning');
+
+    // поллинг
+    polling = setInterval(async () => {
+      try {
+        const s = await checkStatus(jobId);
+        if (s.status === 'provisioning') setStep('provisioning');
+        else if (s.status === 'generating') setStep('generating');
+        else if (s.status === 'done') {
+          clearInterval(polling);
+          setStep('done');
+          genBtn.disabled = false;
+          genBtn.textContent = '🚀 Сгенерировать';
+
+          // показать модель
+          resultCard.style.display = 'block';
+          if (!viewer) viewer = initViewer(viewerContainer);
+          loadModel(viewer, `/outputs/${jobId}/model.glb`);
+          downloadBtn.href = `/api/result/${jobId}`;
+        } else if (s.status === 'failed') {
+          clearInterval(polling);
+          genBtn.disabled = false;
+          genBtn.textContent = '🚀 Сгенерировать';
+          setFailed(s.error || 'Ошибка генерации');
+        }
+      } catch (e) {
+        console.error('poll error:', e);
+      }
+    }, 2000);
+  } catch (e) {
+    genBtn.disabled = false;
+    genBtn.textContent = '🚀 Сгенерировать';
+    setFailed(e.message || 'Ошибка загрузки');
+  }
+});
+
+// ── ресайз ───────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  if (viewer) resizeViewer(viewer);
+});
+
+// ── старт ────────────────────────────────────────────────────────────
+loadPresets();
+</script>
+</body>
+</html>
