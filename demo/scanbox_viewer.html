@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ScanBox AI — 3D Preview</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', -apple-system, sans-serif;
+    background: #0f0f13;
+    color: #e0e0e0;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+  #canvas-container {
+    width: 100vw;
+    height: 100vh;
+    display: block;
+  }
+
+  /* Overlay UI */
+  .overlay {
+    position: fixed;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .top-left {
+    top: 24px; left: 24px;
+    text-align: left;
+  }
+  .top-left h1 {
+    font-size: 22px;
+    font-weight: 700;
+    color: #fff;
+    letter-spacing: 0.5px;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.6);
+  }
+  .top-left h1 span {
+    color: #6c5ce7;
+  }
+  .top-left p {
+    font-size: 13px;
+    color: rgba(255,255,255,0.6);
+    margin-top: 4px;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.5);
+  }
+  .bottom-center {
+    bottom: 32px; left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    pointer-events: none;
+  }
+  .bottom-center .hint {
+    font-size: 13px;
+    color: rgba(255,255,255,0.4);
+    background: rgba(0,0,0,0.5);
+    backdrop-filter: blur(8px);
+    padding: 8px 20px;
+    border-radius: 20px;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .pause-btn {
+    position: fixed;
+    bottom: 80px; right: 24px;
+    background: rgba(108, 92, 231, 0.3);
+    border: 1px solid rgba(108, 92, 231, 0.4);
+    color: #fff;
+    padding: 10px 16px;
+    border-radius: 12px;
+    cursor: pointer;
+    font-size: 13px;
+    pointer-events: auto;
+    backdrop-filter: blur(8px);
+    transition: all 0.2s;
+    z-index: 20;
+  }
+  .pause-btn:hover {
+    background: rgba(108, 92, 231, 0.5);
+  }
+  .pause-btn svg {
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  /* Loading screen */
+  #loading {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: #0f0f13;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.8s ease;
+  }
+  #loading.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .spinner {
+    width: 48px; height: 48px;
+    border: 3px solid rgba(108, 92, 231, 0.2);
+    border-top: 3px solid #6c5ce7;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading p {
+    margin-top: 16px;
+    color: rgba(255,255,255,0.5);
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <p>Загрузка 3D-модели…</p>
+</div>
+
+<div id="canvas-container"></div>
+
+<div class="overlay top-left">
+  <h1>🦎 <span>ScanBox</span> AI</h1>
+  <p>Фото → 3D-модель за 60 секунд</p>
+</div>
+
+<div class="overlay bottom-center">
+  <div class="hint">🖱 Перетащите, чтобы повертеть · Колесо — зум</div>
+</div>
+
+<button class="pause-btn" id="toggleRotate" onclick="toggleRotation()">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <polygon points="5 3 19 12 5 21 5 3"/>
+  </svg>
+  Пауза
+</button>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+// --- Setup ---
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x12121a);
+
+// --- Camera ---
+const camera = new THREE.PerspectiveCamera(32, container.clientWidth / container.clientHeight, 0.1, 20);
+camera.position.set(2.5, 1.8, 3.2);
+camera.lookAt(0, 0.25, 0);
+
+// --- Renderer ---
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(container.clientWidth, container.clientHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.2;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+container.appendChild(renderer.domElement);
+
+// --- Controls ---
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0.25, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 1.2;
+controls.maxDistance = 6;
+controls.maxPolarAngle = Math.PI / 2.1;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 4.0;
+controls.update();
+
+// Make autoRotate toggleable globally
+window.autoRotateEnabled = true;
+window.toggleRotation = function() {
+  controls.autoRotate = !controls.autoRotate;
+  window.autoRotateEnabled = controls.autoRotate;
+  document.getElementById('toggleRotate').innerHTML = window.autoRotateEnabled
+    ? '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Пауза'
+    : '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg> Вращать';
+};
+
+// --- Lights ---
+const ambient = new THREE.AmbientLight(0x404060, 0.6);
+scene.add(ambient);
+
+const mainLight = new THREE.DirectionalLight(0xffeedd, 2.5);
+mainLight.position.set(3, 5, 4);
+mainLight.castShadow = true;
+mainLight.shadow.mapSize.width = 1024;
+mainLight.shadow.mapSize.height = 1024;
+scene.add(mainLight);
+
+const fillLight = new THREE.DirectionalLight(0x8888ff, 0.8);
+fillLight.position.set(-3, 1, 2);
+scene.add(fillLight);
+
+const rimLight = new THREE.DirectionalLight(0xffffff, 0.5);
+rimLight.position.set(0, -1, -4);
+scene.add(rimLight);
+
+// Soft ground fill
+const groundLight = new THREE.SpotLight(0x6c5ce7, 0.3);
+groundLight.position.set(0, 2, 0);
+scene.add(groundLight);
+
+// Background subtle gradient (via a large sphere)
+const bgGeo = new THREE.SphereGeometry(8, 32, 32);
+const bgMat = new THREE.MeshBasicMaterial({
+  color: 0x1a1a2e,
+  side: THREE.BackSide,
+});
+const bgSphere = new THREE.Mesh(bgGeo, bgMat);
+scene.add(bgSphere);
+
+// --- Ground plane (receive shadows) ---
+const groundGeo = new THREE.CircleGeometry(2.5, 64);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x18182a,
+  roughness: 0.9,
+  metalness: 0.0,
+  transparent: true,
+  opacity: 0.6,
+});
+const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+groundMesh.rotation.x = -Math.PI / 2;
+groundMesh.position.y = -0.005;
+groundMesh.receiveShadow = true;
+scene.add(groundMesh);
+
+// --- Load GLB ---
+const loader = new GLTFLoader();
+loader.load(
+  'scanbox_box.glb',
+  (gltf) => {
+    const model = gltf.scene;
+    model.traverse((node) => {
+      if (node.isMesh) {
+        node.castShadow = true;
+        node.receiveShadow = true;
+        // Ensure materials are nice
+        if (node.material) {
+          node.material.roughness = 0.65;
+          node.material.metalness = 0.0;
+          node.material.envMapIntensity = 0.6;
+        }
+      }
+    });
+    scene.add(model);
+
+    // Hide loading screen
+    document.getElementById('loading').classList.add('hidden');
+  },
+  (xhr) => {
+    const pct = Math.round((xhr.loaded / xhr.total) * 100);
+    document.querySelector('#loading p').textContent = `Загрузка 3D-модели… ${pct}%`;
+  },
+  (err) => {
+    console.error('GLB load error:', err);
+    document.querySelector('#loading p').textContent = '❌ Ошибка загрузки модели';
+    document.getElementById('loading').classList.add('hidden');
+  }
+);
+
+// --- Resize ---
+function onResize() {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+  renderer.setSize(w, h);
+}
+window.addEventListener('resize', onResize);
+
+// --- Animate ---
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+
+// --- Touch hint for mobile ---
+if ('ontouchstart' in window) {
+  document.querySelector('.bottom-center .hint').textContent = '👆 Перетащите, чтобы повертеть · Два пальца — зум';
+}
+</script>
+</body>
+</html>
