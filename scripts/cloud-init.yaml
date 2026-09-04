@@ -1,0 +1,19 @@
+#cloud-config
+# Базовая подготовка свежего сервера (пока нет golden-image).
+#
+# Идеал: один раз собрать образ с уже установленным Hunyuan3D-2.1 через Packer
+# и передавать его в SELECTEL_IMAGE — тогда cloud-init не нужен вовсе,
+# а холодный старт сокращается с ~10+ минут до 1–2.
+
+package_update: true
+
+packages:
+  - python3-pip
+  - python3-venv
+  - git
+  - ffmpeg
+  - libgl1
+  - libglib2.0-0
+
+runcmd:
+  - mkdir -p /opt/scanbox
