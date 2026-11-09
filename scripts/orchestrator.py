@@ -6,9 +6,9 @@
 
     create VM ──> wait ready ──> upload photo ──> run job ──> download GLB ──> delete VM
 
-Сервер живёт ровно столько, сколько идёт вычисление, и удаляется ВСЕГДА
-(даже при ошибке). Это тот же принцип, что у CI-раннеров: compute приезжает
-вместе с задачей и умирает после неё.
+После задачи (включая ошибку) выполняется удаление VM с проверкой результата.
+Если API удаления недоступен или процесс runner оборван, нужна внешняя очистка.
+Флаг --keep-on-error оставляет VM для диагностики.
 
 Быстрый прогон без кредов (локально, ничего не арендует):
     python3 orchestrator.py --mock --photo photo.jpg --out model.glb
@@ -28,6 +28,10 @@
     SELECTEL_BOOT_VOLUME_GB  размер загрузочного диска (для GPU обычно нужен, напр. 200)
     SELECTEL_SSH_USER        ssh-пользователь (по умолчанию root)
     SELECTEL_GPU_RATE        тариф GPU, ₽/час — только для сметы (по умолчанию 350)
+    SELECTEL_PREEMPTIBLE     1 — создать прерываемую VM (тег preemptible, API 2.72)
+    SELECTEL_AVAILABILITY_ZONE сегмент пула, например ru-7a
+    SELECTEL_NETWORK_ID      UUID сети (предпочтительно вместо SELECTEL_NETWORK)
+    SELECTEL_SECURITY_GROUP группа безопасности с доступом SSH от runner
 """
 
 from __future__ import annotations
@@ -44,8 +48,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 IDENTITY_URL = "https://cloud.api.selcloud.ru/identity/v3"
-# fallback; реальный URL берём из service catalog при авторизации
-DEFAULT_COMPUTE_URL = "https://api.selcloud.ru/compute/v2.1"
 
 EMOJI = {
     "provisioning": "🚀",
@@ -60,6 +62,16 @@ EMOJI = {
 
 log = logging.getLogger("scanbox")
 GENERATE_SCRIPT = Path(__file__).with_name("generate.py")
+
+
+class SelectelAPIError(RuntimeError):
+    def __init__(self, status_code: int, message: str):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class ServerPreempted(RuntimeError):
+    """Прерываемая VM остановлена; результат нельзя считать готовым."""
 
 
 def status(stage: str, msg: str) -> None:
@@ -82,6 +94,10 @@ class Config:
     gpu_rate: float = 350.0
     mock: bool = False
     keep_on_error: bool = False
+    preemptible: bool = False
+    availability_zone: str = ""
+    network_id: str = ""
+    security_group: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -97,6 +113,10 @@ class Config:
             boot_volume_gb=int(os.environ.get("SELECTEL_BOOT_VOLUME_GB", "0")),
             ssh_user=os.environ.get("SELECTEL_SSH_USER", "root"),
             gpu_rate=float(os.environ.get("SELECTEL_GPU_RATE", "350")),
+            preemptible=os.environ.get("SELECTEL_PREEMPTIBLE", "0").lower() in ("1", "true", "yes"),
+            availability_zone=os.environ.get("SELECTEL_AVAILABILITY_ZONE", ""),
+            network_id=os.environ.get("SELECTEL_NETWORK_ID", ""),
+            security_group=os.environ.get("SELECTEL_SECURITY_GROUP", ""),
         )
 
 
@@ -108,6 +128,7 @@ class SelectelClient:
         self.token: str | None = None
         self.project_id: str | None = None
         self.compute_url: str | None = None
+        self.catalog: list[dict] = []
 
     # --- auth -----------------------------------------------------------
 
@@ -136,11 +157,12 @@ class SelectelClient:
         }
         r = requests.post(f"{IDENTITY_URL}/auth/tokens", json=body, timeout=30)
         if r.status_code >= 400:
-            raise RuntimeError(f"auth failed ({r.status_code}): {r.text[:300]}")
+            raise SelectelAPIError(r.status_code, f"Selectel auth failed ({r.status_code})")
         self.token = r.headers["X-Subject-Token"]  # токен приходит в заголовке
         data = r.json()
         self.project_id = data["token"]["project"]["id"]
-        self.compute_url = self._compute_endpoint(data["token"].get("catalog", []))
+        self.catalog = data["token"].get("catalog", [])
+        self.compute_url = self._compute_endpoint(self.catalog)
         log.info("token ok, project=%s, compute=%s", self.project_id, self.compute_url)
 
     def _compute_endpoint(self, catalog: list[dict]) -> str:
@@ -151,10 +173,10 @@ class SelectelClient:
             for ep in entry.get("endpoints", []):
                 if self.cfg.region and ep.get("region") != self.cfg.region:
                     continue
-                if ep.get("url"):
+                if ep.get("url") and ep.get("interface") == "public":
                     candidates.append(ep["url"])
         if not candidates:
-            return DEFAULT_COMPUTE_URL
+            raise RuntimeError("Публичный compute endpoint для выбранного региона не найден в service catalog")
         url = candidates[0]
         # у некоторых провайдеров в URL есть плейсхолдер проекта
         return url.replace("{project_id}", self.project_id).replace("%(tenant_id)s", self.project_id)
@@ -166,13 +188,15 @@ class SelectelClient:
             self._auth()
         url = path if path.startswith("http") else f"{self.compute_url}{path}"
         headers = {"X-Auth-Token": self.token, "Content-Type": "application/json"}
+        headers["OpenStack-API-Version"] = "compute 2.72"
         r = requests.request(method, url, headers=headers, timeout=60, **kw)
         if r.status_code == 401:  # токен протух — один ретрай
             self._auth()
             headers["X-Auth-Token"] = self.token
+            url = path if path.startswith("http") else f"{self.compute_url}{path}"
             r = requests.request(method, url, headers=headers, timeout=60, **kw)
         if r.status_code >= 400:
-            raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
+            raise SelectelAPIError(r.status_code, f"{method} {path} -> {r.status_code}")
         return r.json() if r.content else {}
 
     # --- discovery ------------------------------------------------------
@@ -222,15 +246,22 @@ class SelectelClient:
 
     # --- server ---------------------------------------------------------
 
-    def create_server(self, name: str, flavor_id: str, image_id: str, key_name: str, user_data: str | None) -> dict:
+    def server_payload(self, name: str, flavor_id: str, image_id: str, key_name: str, user_data: str | None) -> dict:
         server = {
             "name": name,
             "flavorRef": flavor_id,
             "imageRef": image_id,
             "key_name": key_name,
-            "networks": [{"name": self.cfg.network}] if self.cfg.network else [],
+            "networks": ([{"uuid": self.cfg.network_id}] if self.cfg.network_id else
+                         [{"name": self.cfg.network}] if self.cfg.network else "auto"),
             "metadata": {"scanbox-job": name},
         }
+        if self.cfg.preemptible:
+            server["tags"] = ["preemptible"]
+        if self.cfg.availability_zone:
+            server["availability_zone"] = self.cfg.availability_zone
+        if self.cfg.security_group:
+            server["security_groups"] = [{"name": self.cfg.security_group}]
         if self.cfg.boot_volume_gb:
             server.pop("imageRef")
             # GPU-серверы Selectel обычно грузятся с диска (Cinder);
@@ -245,12 +276,23 @@ class SelectelClient:
             }]
         if user_data:
             server["user_data"] = base64.b64encode(user_data.encode()).decode()
-        return self._request("POST", "/servers", json={"server": server})["server"]
+        return {"server": server}
+
+    def create_server(self, **kwargs) -> dict:
+        return self._request("POST", "/servers", json=self.server_payload(**kwargs))["server"]
+
+    def get_server(self, server_id: str) -> dict:
+        return self._request("GET", f"/servers/{server_id}")["server"]
+
+    def check_preempted(self, server: dict) -> None:
+        if self.cfg.preemptible and server.get("status") in {"EXPIRED", "SHELVED_OFFLOADED"}:
+            raise ServerPreempted(f"Прерываемый сервер {server.get('id', '')} остановлен ({server['status']})")
 
     def wait_active(self, server_id: str, timeout: int = 600, poll: int = 10) -> str:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            server = self._request("GET", f"/servers/{server_id}")["server"]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            server = self.get_server(server_id)
+            self.check_preempted(server)
             status_name = server.get("status")
             if status_name == "ACTIVE":
                 return self.server_ip(server)
@@ -270,8 +312,53 @@ class SelectelClient:
     def delete_server(self, server_id: str) -> None:
         try:
             self._request("DELETE", f"/servers/{server_id}")
-        except Exception as exc:  # 404 на повторе — уже удалён
-            log.warning("не удалось удалить сервер %s: %s", server_id, exc)
+        except SelectelAPIError as exc:
+            if exc.status_code != 404:
+                raise
+
+    def wait_deleted(self, server_id: str, timeout: int = 300, poll: int = 5) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                self.get_server(server_id)
+            except SelectelAPIError as exc:
+                if exc.status_code == 404:
+                    return
+                raise
+            time.sleep(poll)
+        raise TimeoutError(f"Удаление сервера {server_id} не подтверждено за {timeout}с")
+
+    def wait_volumes_deleted(self, volume_ids: list[str], timeout: int = 300, poll: int = 5) -> None:
+        """Verify Cinder deletion; never delete an unrelated volume explicitly."""
+        import requests
+        if not volume_ids:
+            return
+        if not self.token:
+            self._auth()
+        deadline = time.monotonic() + timeout
+        remaining = set(volume_ids)
+        while remaining and time.monotonic() < deadline:
+            endpoints = [ep["url"] for service in self.catalog if service.get("type") == "volumev3"
+                         for ep in service.get("endpoints", [])
+                         if ep.get("interface") == "public" and ep.get("url") and
+                         (not self.cfg.region or ep.get("region") == self.cfg.region)]
+            if not endpoints:
+                raise RuntimeError("volumev3 endpoint не найден: проверьте удаление сетевых дисков вручную")
+            base = endpoints[0].replace("{project_id}", self.project_id).replace("%(tenant_id)s", self.project_id)
+            for volume_id in list(remaining):
+                response = requests.get(f"{base.rstrip('/')}/volumes/{volume_id}",
+                                        headers={"X-Auth-Token": self.token}, timeout=30)
+                if response.status_code == 404:
+                    remaining.remove(volume_id)
+                elif response.status_code == 401:
+                    self._auth()
+                    break
+                elif response.status_code >= 400:
+                    raise SelectelAPIError(response.status_code, f"Не удалось проверить диск {volume_id}")
+            if remaining:
+                time.sleep(poll)
+        if remaining:
+            raise TimeoutError("Удаление дисков не подтверждено: " + ", ".join(sorted(remaining)))
 
 
 class MockClient:
@@ -315,7 +402,8 @@ def create_ephemeral_keypair(client, name: str):
     return key
 
 
-def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path) -> None:
+def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path,
+                  client=None, server_id: str | None = None) -> None:
     """Залить фото + джобу, выполнить на GPU, забрать GLB."""
     import paramiko
 
@@ -323,6 +411,8 @@ def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path) -> None:
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     deadline = time.time() + 300
     while True:
+        if client is not None and server_id:
+            client.check_preempted(client.get_server(server_id))
         try:
             ssh.connect(host, username=cfg.ssh_user, pkey=key, timeout=15)
             break
@@ -337,9 +427,25 @@ def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path) -> None:
         cmd = "python3 /tmp/generate.py --input /tmp/photo.jpg --output /tmp/model.glb"
         log.info("remote: %s", cmd)
         _, stdout, stderr = ssh.exec_command(cmd, timeout=1800)
-        exit_code = stdout.channel.recv_exit_status()
-        log.debug("stdout:\n%s", stdout.read().decode())
-        err = stderr.read().decode()
+        channel = stdout.channel
+        command_deadline = time.monotonic() + 1800
+        next_poll = 0.0
+        error_tail = b""
+        while True:
+            while channel.recv_ready():
+                channel.recv(65536)
+            while channel.recv_stderr_ready():
+                error_tail = (error_tail + channel.recv_stderr(65536))[-8192:]
+            if channel.exit_status_ready():
+                break
+            if time.monotonic() >= command_deadline:
+                raise TimeoutError("Генерация не закончилась за 1800с")
+            if client is not None and server_id and time.monotonic() >= next_poll:
+                client.check_preempted(client.get_server(server_id))
+                next_poll = time.monotonic() + 10
+            time.sleep(0.5)
+        exit_code = channel.recv_exit_status()
+        err = error_tail.decode(errors="replace")
         if exit_code != 0:
             raise RuntimeError(f"генерация упала (exit {exit_code}): {err[:500]}")
         with ssh.open_sftp() as sftp:
@@ -391,7 +497,7 @@ def run_job(cfg: Config, photo: Path, out: Path, job_id: str) -> None:
             )
         else:
             status("uploading", f"шлём фото и джобу на {ip} ...")
-            ssh_run_fetch(cfg, key, ip, photo, out)
+            ssh_run_fetch(cfg, key, ip, photo, out, client=client, server_id=server_id)
             status("generating", "генерация завершена на GPU")
 
         status("done", f"модель: {out}")
@@ -401,15 +507,18 @@ def run_job(cfg: Config, photo: Path, out: Path, job_id: str) -> None:
             log.warning(
                 "--keep-on-error: сервер НЕ удалён (id=%s) — сними флаг, чтобы гарантировать удаление", server_id
             )
-            return
         raise
     finally:
-        if server_id and not cfg.keep_on_error:
-            status("deleting", "удаляем сервер ...")
-            client.delete_server(server_id)
-            status("deleted", "сервер удалён")
-        if key_name:
-            client.delete_keypair(key_name)
+        try:
+            if server_id and not cfg.keep_on_error:
+                status("deleting", "удаляем сервер ...")
+                client.delete_server(server_id)
+                if not cfg.mock:
+                    client.wait_deleted(server_id)
+                status("deleted", "сервер удалён")
+        finally:
+            if key_name:
+                client.delete_keypair(key_name)
         minutes = (time.monotonic() - started) / 60
         log.info(
             "итого: %.1f мин под нагрузкой, смета ≈ %.2f ₽ (тариф %.0f ₽/ч)",
@@ -425,6 +534,7 @@ def main() -> int:
     ap.add_argument("--out", default="model.glb", help="куда сохранить GLB")
     ap.add_argument("--job-id", default=uuid.uuid4().hex[:8], help="имя джобы/сервера")
     ap.add_argument("--mock", action="store_true", help="не трогать Selectel — прогнать пайплайн локально")
+    ap.add_argument("--preemptible", action="store_true", help="создать прерываемую VM Selectel")
     ap.add_argument("--keep-on-error", action="store_true",
                     help="НЕ удалять сервер при ошибке (для отладки; жжёт деньги!)")
     ap.add_argument("--flavor", default="", help="id/имя flavor (или SELECTEL_FLAVOR)")
@@ -445,6 +555,7 @@ def main() -> int:
     cfg = Config.from_env()
     cfg.mock = args.mock
     cfg.keep_on_error = args.keep_on_error
+    cfg.preemptible = cfg.preemptible or args.preemptible
     if args.flavor:
         cfg.flavor = args.flavor
     if args.image:

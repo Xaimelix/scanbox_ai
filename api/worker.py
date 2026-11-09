@@ -15,7 +15,7 @@ import uuid
 from pathlib import Path
 from typing import Literal
 
-from scripts.orchestrator import Config, run_job
+from scripts.orchestrator import Config, ServerPreempted, run_job
 
 log = logging.getLogger("scanbox.worker")
 
@@ -40,6 +40,7 @@ class JobRecord:
         "out_dir",
         "glb_path",
         "error",
+        "error_code",
         "created_at",
         "finished_at",
         "_event",
@@ -52,6 +53,7 @@ class JobRecord:
         self.out_dir = out_dir
         self.glb_path: Path | None = None
         self.error: str | None = None
+        self.error_code: str | None = None
         self.created_at = time.time()
         self.finished_at: float | None = None
         self._event = threading.Event()
@@ -73,6 +75,8 @@ class JobRecord:
         }
         if self.error:
             d["error"] = self.error
+        if self.error_code:
+            d["error_code"] = self.error_code
         return d
 
 
@@ -124,6 +128,11 @@ class JobManager:
                 rec.status = "done"
                 rec.glb_path = glb
                 log.info("джоба %s: ✅ модель готова", job_id)
+            except ServerPreempted as exc:
+                rec.status = "failed"
+                rec.error_code = "server_preempted"
+                rec.error = str(exc)
+                log.warning("джоба %s прервана провайдером: %s", job_id, exc)
             except Exception as exc:
                 rec.status = "failed"
                 rec.error = str(exc)

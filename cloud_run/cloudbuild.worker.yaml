@@ -1,0 +1,6 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: [build, -f, cloud_run/Dockerfile.worker, --build-arg, 'BASE_IMAGE=${_BASE_IMAGE}', -t, '${_IMAGE}', .]
+images: ['${_IMAGE}']
+substitutions:
+  _BASE_IMAGE: python:3.12-slim

@@ -26,3 +26,15 @@ flowchart LR
 
 ## Current focus
 The current documentation set covers architecture, reconstruction choices, and LiDAR integration. The next step is to expand the roadmap and open questions into a more product-oriented plan.
+
+## Cloud Run GPU backend
+
+See [cloud_run/README.md](cloud_run/README.md) for the Cloud Run GPU assessment,
+private job creation/status/cancellation API, GCS worker, deployment scripts,
+cost estimate, and local tests. The existing Selectel demo remains available.
+
+## Selectel preemptible GPU test
+
+See [selectel-preemptible.md](selectel-preemptible.md) for Selectel preemptible
+VM support and a lifecycle smoke test: create, verify the tag/GPU, and delete
+the VM, boot volumes, and temporary keypair.

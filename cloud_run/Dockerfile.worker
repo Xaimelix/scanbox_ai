@@ -1,0 +1,11 @@
+# Default image validates the infrastructure with the explicit mock engine.
+# For hunyuan-shape pass a tested CUDA/torch image with hy3dshape and baked weights.
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE}
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+WORKDIR /app
+RUN pip install --no-cache-dir 'google-cloud-storage>=3.1,<4'
+COPY cloud_run /app/cloud_run
+COPY scripts/generate.py /app/scripts/generate.py
+USER 65532:65532
+CMD ["python", "-m", "cloud_run.worker"]
