@@ -1,0 +1,53 @@
+# Run this file on the GPU VM. It does not create VM instances.
+services:
+  worker:
+    image: ${SCANBOX_GPU_IMAGE:-scanbox/gpu-worker:local}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gpu
+    init: true
+    command: [doctor]
+    environment:
+      SCANBOX_MODEL_PATH: /models/Hunyuan3D-2.1
+    volumes:
+      - type: bind
+        source: ${SCANBOX_MODELS_DIR:-./models}
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SCANBOX_WORK_DIR:-./work}
+        target: /work
+        bind:
+          create_host_path: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  models:
+    image: ${SCANBOX_GPU_IMAGE:-scanbox/gpu-worker:local}
+    profiles: [setup]
+    user: ${SCANBOX_LOCAL_UID:-1000}:${SCANBOX_LOCAL_GID:-1000}
+    entrypoint: [python, /app/gpu_worker.py, prepare-models]
+    environment:
+      HF_HUB_OFFLINE: "0"
+      TRANSFORMERS_OFFLINE: "0"
+      SCANBOX_MODEL_PATH: /models/Hunyuan3D-2.1
+    volumes:
+      - type: bind
+        source: ${SCANBOX_MODELS_DIR:-./models}
+        target: /models
+        bind:
+          create_host_path: false
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

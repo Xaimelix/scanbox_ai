@@ -5,3 +5,14 @@
 api/outputs
 demo
 .venv
+**/.venv
+**/.env.*
+!**/.env.example
+**/*openrc*
+**/rc.sh
+**/rc-*.sh
+**/*.pem
+**/*.key
+reports
+models
+work

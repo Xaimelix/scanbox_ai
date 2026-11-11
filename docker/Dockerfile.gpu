@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+ARG HUNYUAN_COMMIT=82920d643c0dc2f7bfd7255f45f62d386edfe60c
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp \
+    PYTHONPATH=/opt/Hunyuan3D-2.1/hy3dshape \
+    SCANBOX_MODEL_PATH=/models/Hunyuan3D-2.1 \
+    HF_HOME=/tmp/huggingface HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 libgomp1 libegl1 libopengl0 libxrender1 libsm6 libxext6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/requirements.shape.txt /app/requirements.shape.txt
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then \
+      PIP_CERT=/run/secrets/proxy_ca pip install --no-cache-dir -r requirements.shape.txt; \
+    else pip install --no-cache-dir -r requirements.shape.txt; fi
+# Download immutable upstream code without requiring git or a compiler in runtime.
+RUN --mount=type=secret,id=proxy_ca \
+    HUNYUAN_COMMIT="${HUNYUAN_COMMIT}" python - <<'PY'
+import io, os, pathlib, re, ssl, tarfile, urllib.request
+revision = os.environ['HUNYUAN_COMMIT']
+assert re.fullmatch(r'[0-9a-f]{40}', revision), 'Use a full upstream commit SHA'
+ca = '/run/secrets/proxy_ca'
+context = ssl.create_default_context(cafile=ca if pathlib.Path(ca).exists() else None)
+url = f'https://codeload.github.com/Tencent-Hunyuan/Hunyuan3D-2.1/tar.gz/{revision}'
+with urllib.request.urlopen(url, context=context, timeout=120) as response:
+    archive = tarfile.open(fileobj=io.BytesIO(response.read()), mode='r:gz')
+    archive.extractall('/opt', filter='data')
+pathlib.Path(f'/opt/Hunyuan3D-2.1-{revision}').rename('/opt/Hunyuan3D-2.1')
+PY
+COPY --chown=65532:65532 scripts/generate.py /app/scripts/generate.py
+COPY --chown=65532:65532 cloud_run/__init__.py cloud_run/worker.py /app/cloud_run/
+COPY --chown=65532:65532 docker/gpu_worker.py /app/gpu_worker.py
+RUN python -c 'from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline'
+RUN mkdir /models /work && chmod 1777 /work
+USER 65532:65532
+ENTRYPOINT ["python", "/app/gpu_worker.py"]
+CMD ["doctor"]

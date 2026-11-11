@@ -38,3 +38,6 @@ cost estimate, and local tests. The existing Selectel demo remains available.
 See [selectel-preemptible.md](selectel-preemptible.md) for Selectel preemptible
 VM support and a lifecycle smoke test: create, verify the tag/GPU, and delete
 the VM, boot volumes, and temporary keypair.
+
+Docker runner and GPU worker commands are documented in [docker/README.md](docker/README.md),
+with separate Compose files for the local control plane and GPU VM.

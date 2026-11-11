@@ -1,0 +1,47 @@
+# Local control plane: no GPU is needed here. RC credentials are runtime env only.
+services:
+  selectel:
+    image: scanbox/selectel-runner:local
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.runner
+    init: true
+    command: [--preflight]
+    environment:
+      SELECTEL_AUTH_SOURCE: ${SELECTEL_AUTH_SOURCE:-auto}
+      OS_AUTH_URL: ${OS_AUTH_URL:-}
+      OS_AUTH_TYPE: ${OS_AUTH_TYPE:-v3password}
+      OS_COMPUTE_API_VERSION: "2.72"
+      OS_USERNAME: ${OS_USERNAME:-}
+      OS_USER_ID: ${OS_USER_ID:-}
+      OS_PASSWORD: ${OS_PASSWORD:-}
+      OS_USER_DOMAIN_ID: ${OS_USER_DOMAIN_ID:-}
+      OS_USER_DOMAIN_NAME: ${OS_USER_DOMAIN_NAME:-Default}
+      OS_PROJECT_ID: ${OS_PROJECT_ID:-${OS_TENANT_ID:-}}
+      OS_PROJECT_NAME: ${OS_PROJECT_NAME:-${OS_TENANT_NAME:-}}
+      OS_PROJECT_DOMAIN_ID: ${OS_PROJECT_DOMAIN_ID:-}
+      OS_PROJECT_DOMAIN_NAME: ${OS_PROJECT_DOMAIN_NAME:-Default}
+      OS_REGION_NAME: ${OS_REGION_NAME:-}
+      SELECTEL_ACCOUNT_ID: ${SELECTEL_ACCOUNT_ID:-}
+      SELECTEL_USERNAME: ${SELECTEL_USERNAME:-}
+      SELECTEL_PASSWORD: ${SELECTEL_PASSWORD:-}
+      SELECTEL_PROJECT_NAME: ${SELECTEL_PROJECT_NAME:-default}
+      SELECTEL_REGION: ${SELECTEL_REGION:-}
+      SELECTEL_FLAVOR: ${SELECTEL_FLAVOR:-}
+      SELECTEL_IMAGE: ${SELECTEL_IMAGE:-}
+      SELECTEL_NETWORK_ID: ${SELECTEL_NETWORK_ID:-}
+      SELECTEL_AVAILABILITY_ZONE: ${SELECTEL_AVAILABILITY_ZONE:-}
+      SELECTEL_SECURITY_GROUP: ${SELECTEL_SECURITY_GROUP:-}
+      SELECTEL_BOOT_VOLUME_GB: ${SELECTEL_BOOT_VOLUME_GB:-0}
+      SELECTEL_SSH_USER: ${SELECTEL_SSH_USER:-root}
+      SELECTEL_WORKER_IMAGE: ${SELECTEL_WORKER_IMAGE:-}
+      SELECTEL_MODEL_DIR: ${SELECTEL_MODEL_DIR:-/opt/scanbox/models}
+    volumes:
+      - reports:/reports
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  reports:

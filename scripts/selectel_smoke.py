@@ -9,11 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 from pathlib import Path
 import time
 import uuid
 
-from scripts.orchestrator import Config, SelectelClient, create_ephemeral_keypair
+from scripts.orchestrator import Config, SelectelClient, container_args, create_ephemeral_keypair
 
 
 def gpu_probe(cfg, key, host, client, server_id):
@@ -33,13 +34,14 @@ def gpu_probe(cfg, key, host, client, server_id):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("SSH не доступен за 300с; проверьте сеть, образ и security group")
                 time.sleep(5)
-        _, stdout, stderr = ssh.exec_command(
-            "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader", timeout=30)
+        command = (shlex.join(container_args(cfg) + [cfg.worker_image, "doctor"]) if cfg.worker_image else
+                   "nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader")
+        _, stdout, stderr = ssh.exec_command(command, timeout=60)
         output = stdout.read(8192).decode(errors="replace").strip()
         error = stderr.read(8192).decode(errors="replace").strip()
         code = stdout.channel.recv_exit_status()
         if code != 0 or not output:
-            raise RuntimeError(f"nvidia-smi не прошёл: exit={code}; {error[:500]}")
+            raise RuntimeError(f"Проверка GPU не прошла: exit={code}; {error[:500]}")
         return output
     finally:
         ssh.close()

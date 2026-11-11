@@ -1,0 +1,2 @@
+-r ../scripts/requirements.txt
+python-openstackclient>=8,<9

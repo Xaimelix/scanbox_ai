@@ -40,6 +40,7 @@ import argparse
 import base64
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -107,6 +108,8 @@ class Config:
     project_domain_id: str = ""
     project_domain_name: str = ""
     auth_type: str = "v3password"
+    worker_image: str = ""
+    model_dir: str = "/opt/scanbox/models"
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -126,6 +129,8 @@ class Config:
             availability_zone=os.environ.get("SELECTEL_AVAILABILITY_ZONE", ""),
             network_id=os.environ.get("SELECTEL_NETWORK_ID", ""),
             security_group=os.environ.get("SELECTEL_SECURITY_GROUP", ""),
+            worker_image=os.environ.get("SELECTEL_WORKER_IMAGE", ""),
+            model_dir=os.environ.get("SELECTEL_MODEL_DIR", "/opt/scanbox/models"),
         )
         # Prefer the RC identity when present. A leftover SELECTEL_USERNAME must
         # not switch away from RC or cause a cross-identity password fallback.
@@ -494,6 +499,24 @@ def create_ephemeral_keypair(client, name: str):
     return key
 
 
+def container_args(cfg: Config) -> list[str]:
+    if not cfg.worker_image:
+        raise ValueError("Задайте SELECTEL_WORKER_IMAGE")
+    return ["docker", "run", "--rm", "--pull", "never", "--gpus", "device=0", "--network", "none",
+            "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges:true"]
+
+
+def container_command(cfg: Config, remote_work: str) -> str:
+    """A tested, pre-pulled image and model directory belong on the VM image."""
+    if not cfg.model_dir.startswith("/"):
+        raise ValueError("Задайте абсолютный SELECTEL_MODEL_DIR")
+    args = container_args(cfg) + [
+            "--volume", f"{remote_work}:/work", "--volume", f"{cfg.model_dir}:/models:ro",
+            cfg.worker_image, "infer", "--input", "/work/photo.png", "--output", "/work/model.glb"]
+    return shlex.join(args)
+
+
 def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path,
                   client=None, server_id: str | None = None) -> None:
     """Залить фото + джобу, выполнить на GPU, забрать GLB."""
@@ -513,10 +536,18 @@ def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path,
                 raise TimeoutError(f"SSH к {host} не поднялся за 5 минут: {exc}")
             time.sleep(10)
     try:
+        remote_work = f"/tmp/scanbox-{uuid.uuid4().hex}"
         with ssh.open_sftp() as sftp:
-            sftp.put(str(photo), "/tmp/photo.jpg")
-            sftp.put(str(GENERATE_SCRIPT), "/tmp/generate.py")
-        cmd = "python3 /tmp/generate.py --input /tmp/photo.jpg --output /tmp/model.glb"
+            if cfg.worker_image:
+                sftp.mkdir(remote_work, mode=0o777)
+                sftp.chmod(remote_work, 0o777)
+                sftp.put(str(photo), f"{remote_work}/photo.png")
+                sftp.chmod(f"{remote_work}/photo.png", 0o644)
+            else:
+                sftp.put(str(photo), "/tmp/photo.jpg")
+                sftp.put(str(GENERATE_SCRIPT), "/tmp/generate.py")
+        cmd = (container_command(cfg, remote_work) if cfg.worker_image else
+               "python3 /tmp/generate.py --input /tmp/photo.jpg --output /tmp/model.glb")
         log.info("remote: %s", cmd)
         _, stdout, stderr = ssh.exec_command(cmd, timeout=1800)
         channel = stdout.channel
@@ -541,7 +572,7 @@ def ssh_run_fetch(cfg: Config, key, host: str, photo: Path, out: Path,
         if exit_code != 0:
             raise RuntimeError(f"генерация упала (exit {exit_code}): {err[:500]}")
         with ssh.open_sftp() as sftp:
-            sftp.get("/tmp/model.glb", str(out))
+            sftp.get(f"{remote_work}/model.glb" if cfg.worker_image else "/tmp/model.glb", str(out))
     finally:
         ssh.close()
 

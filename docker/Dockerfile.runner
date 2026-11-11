@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp
+WORKDIR /app
+COPY scripts/requirements.txt /app/scripts/requirements.txt
+COPY docker/requirements.runner.txt /app/docker/requirements.runner.txt
+RUN --mount=type=secret,id=proxy_ca \
+    if [ -f /run/secrets/proxy_ca ]; then \
+      PIP_CERT=/run/secrets/proxy_ca pip install --no-cache-dir -r docker/requirements.runner.txt; \
+    else pip install --no-cache-dir -r docker/requirements.runner.txt; fi
+COPY --chown=65532:65532 scripts /app/scripts
+RUN mkdir /reports && chown 65532:65532 /reports
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "scripts.selectel_smoke"]
+CMD ["--preflight"]
