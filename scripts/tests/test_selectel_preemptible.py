@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from unittest.mock import Mock, patch
 from scripts.orchestrator import (
     Config, SelectelAPIError, SelectelClient, ServerPreempted, run_job,
 )
-from scripts.selectel_smoke import smoke, validate_config
+from scripts.selectel_smoke import preflight, smoke, validate_config
 
 
 def config(**kwargs):
@@ -106,6 +107,95 @@ class SelectelTests(unittest.TestCase):
         client.delete_server.assert_called_once_with("vm")
         client.wait_deleted.assert_called_once_with("vm")
         client.delete_keypair.assert_called_once_with("scanbox-job")
+
+
+class RcAuthTests(unittest.TestCase):
+    RC = {"OS_AUTH_URL": "https://identity.example/v3/", "OS_AUTH_TYPE": "v3password",
+          "OS_USERNAME": "service-user", "OS_PASSWORD": "test-password",
+          "OS_USER_DOMAIN_NAME": "account-domain", "OS_PROJECT_ID": "project-id",
+          "OS_PROJECT_NAME": "do-not-use-this-name", "OS_REGION_NAME": "ru-7"}
+
+    def test_rc_project_id_takes_priority_over_name(self):
+        with patch.dict(os.environ, self.RC, clear=True):
+            cfg = Config.from_env()
+        body = cfg.auth_body()["auth"]
+        self.assertEqual(cfg.auth_source, "openstack")
+        self.assertEqual(cfg.region, "ru-7")
+        self.assertEqual(body["scope"]["project"], {"id": "project-id"})
+        self.assertEqual(body["identity"]["password"]["user"]["domain"], {"name": "account-domain"})
+
+    def test_rc_user_id_does_not_need_domain(self):
+        with patch.dict(os.environ, {**self.RC, "OS_USER_ID": "user-id"}, clear=True):
+            cfg = Config.from_env()
+        user = cfg.auth_body()["auth"]["identity"]["password"]["user"]
+        self.assertEqual(user, {"id": "user-id", "password": "test-password"})
+
+    def test_project_name_and_domain_id(self):
+        env = {**self.RC, "OS_PROJECT_DOMAIN_ID": "domain-id"}
+        del env["OS_PROJECT_ID"]
+        with patch.dict(os.environ, env, clear=True):
+            cfg = Config.from_env()
+        self.assertEqual(cfg.auth_body()["auth"]["scope"]["project"], {
+            "name": "do-not-use-this-name", "domain": {"id": "domain-id"}})
+
+    def test_legacy_credentials_are_not_mixed_with_rc_scope(self):
+        with patch.dict(os.environ, {**self.RC, "SELECTEL_USERNAME": "legacy-user",
+                                    "SELECTEL_PASSWORD": "legacy-password",
+                                    "SELECTEL_ACCOUNT_ID": "legacy-domain"}, clear=True):
+            cfg = Config.from_env()
+        self.assertEqual(cfg.auth_source, "selectel")
+        self.assertEqual(cfg.auth_body()["auth"]["scope"]["project"], {
+            "name": "default", "domain": {"name": "legacy-domain"}})
+
+    def test_missing_password_names_variable_without_exposing_other_values(self):
+        with patch.dict(os.environ, {**self.RC, "OS_PASSWORD": ""}, clear=True):
+            cfg = Config.from_env()
+        with self.assertRaisesRegex(ValueError, "OS_PASSWORD") as error:
+            cfg.auth_body()
+        self.assertNotIn("service-user", str(error.exception))
+
+    def test_unsupported_auth_type_fails_explicitly(self):
+        with patch.dict(os.environ, {**self.RC, "OS_AUTH_TYPE": "v3applicationcredential"}, clear=True):
+            cfg = Config.from_env()
+        with self.assertRaisesRegex(ValueError, "OS_AUTH_TYPE"):
+            cfg.auth_body()
+
+    @patch("requests.post")
+    def test_token_request_uses_rc_endpoint_and_project_id(self, post):
+        post.return_value = SimpleNamespace(status_code=201, headers={"X-Subject-Token": "test-token"},
+            json=lambda: {"token": {"project": {"id": "project-id"}, "catalog": [{
+                "type": "compute", "endpoints": [{"interface": "public", "region": "ru-7",
+                                                    "url": "https://nova.example/v2.1"}]}]}})
+        with patch.dict(os.environ, self.RC, clear=True):
+            client = SelectelClient(Config.from_env())
+        client._auth()
+        self.assertEqual(post.call_args.args[0], "https://identity.example/v3/auth/tokens")
+        self.assertEqual(post.call_args.kwargs["json"]["auth"]["scope"]["project"], {"id": "project-id"})
+
+    def test_preflight_without_resource_settings_only_uses_get(self):
+        with patch.dict(os.environ, self.RC, clear=True):
+            cfg = Config.from_env()
+        client = SelectelClient(cfg)
+        client._request = Mock(side_effect=[{"servers": []}, {"flavors": []}])
+        client.find_image = Mock()
+        result = preflight(cfg, client)
+        self.assertFalse(result["resources_created"])
+        self.assertEqual(result["servers_on_first_page"], 0)
+        self.assertEqual(client._request.call_count, 2)
+        self.assertTrue(all(call.args[0] == "GET" for call in client._request.call_args_list))
+        client.find_image.assert_not_called()
+
+    @patch("requests.get")
+    def test_image_selection_uses_glance_without_nova_microversion(self, get):
+        get.return_value = SimpleNamespace(status_code=200, json=lambda: {
+            "images": [{"id": "id", "name": "gpu-image", "status": "active"}]})
+        client = SelectelClient(config())
+        client.token, client.project_id = "test-token", "project-id"
+        client.catalog = [{"type": "image", "endpoints": [{"interface": "public", "region": "ru-7",
+                                                            "url": "https://glance.example"}]}]
+        self.assertEqual(client.find_image("gpu-image")["id"], "id")
+        self.assertEqual(get.call_args.args[0], "https://glance.example/v2/images")
+        self.assertNotIn("OpenStack-API-Version", get.call_args.kwargs["headers"])
 
 
 class SmokeTests(unittest.TestCase):

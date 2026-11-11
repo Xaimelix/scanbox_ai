@@ -44,19 +44,38 @@ def gpu_probe(cfg, key, host, client, server_id):
         ssh.close()
 
 
-def validate_config(cfg, require_credentials=True):
+def validate_config(cfg, require_credentials=True, require_resources=True):
     required = {
         "SELECTEL_REGION": cfg.region, "SELECTEL_FLAVOR": cfg.flavor,
         "SELECTEL_IMAGE": cfg.image, "SELECTEL_NETWORK_ID": cfg.network_id,
         "SELECTEL_AVAILABILITY_ZONE": cfg.availability_zone,
         "SELECTEL_SECURITY_GROUP": cfg.security_group,
     }
+    if not require_resources:
+        required = {"OS_REGION_NAME или SELECTEL_REGION": cfg.region}
     if require_credentials:
-        required.update(SELECTEL_ACCOUNT_ID=cfg.account_id,
-                        SELECTEL_USERNAME=cfg.username, SELECTEL_PASSWORD=cfg.password)
+        cfg.auth_body()
     missing = [key for key, value in required.items() if not value]
     if missing:
         raise ValueError("Задайте переменные: " + ", ".join(missing))
+
+
+def preflight(cfg, client):
+    """Only issue token and perform GETs; no resource config is needed."""
+    validate_config(cfg, require_resources=False)
+    servers = client._request("GET", "/servers", params={"limit": 100}).get("servers", [])
+    flavors = client._request("GET", "/flavors/detail", params={"limit": 100}).get("flavors", [])
+    result = {"auth": "ok", "auth_source": cfg.auth_source, "project_id": client.project_id,
+              "region": cfg.region, "resources_created": False,
+              "servers_on_first_page": len(servers),
+              "flavors": [{key: item.get(key) for key in ("id", "name", "vcpus", "ram")}
+                          for item in flavors], "page_limit": 100}
+    # Query Glance only when an image was explicitly selected. A compute-only
+    # viewer can check auth/Nova without needing image-service permissions.
+    if cfg.image:
+        image = client.find_image(cfg.image)
+        result["image"] = {key: image.get(key) for key in ("id", "name", "status")}
+    return result
 
 
 def smoke(cfg, report_path: Path, client=None, probe=gpu_probe):
@@ -134,7 +153,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan", action="store_true", help="JSON запроса без сети и создания VM")
-    mode.add_argument("--preflight", action="store_true", help="только auth и чтение flavor/image")
+    mode.add_argument("--preflight", action="store_true", help="только auth и чтение серверов/флейворов")
     mode.add_argument("--smoke", action="store_true", help="создать платную VM, проверить GPU и удалить")
     parser.add_argument("--report", type=Path, default=Path("/tmp/selectel-smoke.json"))
     args = parser.parse_args()
@@ -149,12 +168,10 @@ def main():
                           "body": body}, ensure_ascii=False, indent=2))
         return 0
     try:
-        validate_config(cfg)
         if args.preflight:
-            print(json.dumps({"flavor": client.find_flavor(cfg.flavor),
-                              "image": client.find_image(cfg.image),
-                              "resources_created": False}, ensure_ascii=False, indent=2))
+            print(json.dumps(preflight(cfg, client), ensure_ascii=False, indent=2))
             return 0
+        validate_config(cfg)
         result = smoke(cfg, args.report, client)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["status"] == "passed" else 1

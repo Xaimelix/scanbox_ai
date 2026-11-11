@@ -98,10 +98,19 @@ class Config:
     availability_zone: str = ""
     network_id: str = ""
     security_group: str = ""
+    auth_url: str = IDENTITY_URL
+    auth_source: str = "selectel"
+    user_id: str = ""
+    user_domain_id: str = ""
+    user_domain_name: str = ""
+    project_id: str = ""
+    project_domain_id: str = ""
+    project_domain_name: str = ""
+    auth_type: str = "v3password"
 
     @classmethod
     def from_env(cls) -> "Config":
-        return cls(
+        cfg = cls(
             account_id=os.environ.get("SELECTEL_ACCOUNT_ID", ""),
             username=os.environ.get("SELECTEL_USERNAME", ""),
             password=os.environ.get("SELECTEL_PASSWORD", ""),
@@ -118,6 +127,59 @@ class Config:
             network_id=os.environ.get("SELECTEL_NETWORK_ID", ""),
             security_group=os.environ.get("SELECTEL_SECURITY_GROUP", ""),
         )
+        # A sourced RC file is a complete auth configuration. Never combine its
+        # project/domain selectors with a different SELECTEL_* identity.
+        if not any(os.environ.get(key) for key in (
+            "SELECTEL_ACCOUNT_ID", "SELECTEL_USERNAME", "SELECTEL_PASSWORD")) and any(
+                os.environ.get(key) for key in ("OS_AUTH_URL", "OS_USERNAME", "OS_USER_ID")):
+            cfg.auth_source = "openstack"
+            cfg.auth_url = os.environ.get("OS_AUTH_URL", IDENTITY_URL).rstrip("/")
+            cfg.username = os.environ.get("OS_USERNAME", "")
+            cfg.password = os.environ.get("OS_PASSWORD", "")
+            cfg.user_id = os.environ.get("OS_USER_ID", "")
+            cfg.user_domain_id = os.environ.get("OS_USER_DOMAIN_ID", "")
+            cfg.user_domain_name = os.environ.get("OS_USER_DOMAIN_NAME", "Default")
+            cfg.project_id = os.environ.get("OS_PROJECT_ID", "") or os.environ.get("OS_TENANT_ID", "")
+            cfg.project_name = os.environ.get("OS_PROJECT_NAME", "") or os.environ.get("OS_TENANT_NAME", "")
+            cfg.project_domain_id = os.environ.get("OS_PROJECT_DOMAIN_ID", "")
+            cfg.project_domain_name = os.environ.get("OS_PROJECT_DOMAIN_NAME", "Default")
+            cfg.region = os.environ.get("OS_REGION_NAME", "")
+            cfg.auth_type = os.environ.get("OS_AUTH_TYPE", "v3password")
+        return cfg
+
+    def auth_body(self) -> dict:
+        if self.auth_source == "openstack":
+            if self.auth_type not in {"password", "v3password"}:
+                raise ValueError("Поддерживается RC с OS_AUTH_TYPE=password/v3password")
+            missing = []
+            if not (self.user_id or self.username):
+                missing.append("OS_USERNAME или OS_USER_ID")
+            if not self.password:
+                missing.append("OS_PASSWORD")
+            if not (self.project_id or self.project_name):
+                missing.append("OS_PROJECT_ID или OS_PROJECT_NAME")
+            if missing:
+                raise ValueError("Задайте переменные RC: " + ", ".join(missing))
+            user = {"password": self.password}
+            if self.user_id:
+                user["id"] = self.user_id
+            else:
+                user.update(name=self.username, domain=(
+                    {"id": self.user_domain_id} if self.user_domain_id else {"name": self.user_domain_name}))
+            project = ({"id": self.project_id} if self.project_id else {
+                "name": self.project_name,
+                "domain": ({"id": self.project_domain_id} if self.project_domain_id else
+                           {"name": self.project_domain_name}),
+            })
+        else:
+            missing = [key for key, value in (("SELECTEL_ACCOUNT_ID", self.account_id),
+                       ("SELECTEL_USERNAME", self.username), ("SELECTEL_PASSWORD", self.password)) if not value]
+            if missing:
+                raise ValueError("Задайте переменные: " + ", ".join(missing))
+            user = {"name": self.username, "domain": {"name": self.account_id}, "password": self.password}
+            project = {"name": self.project_name, "domain": {"name": self.account_id}}
+        return {"auth": {"identity": {"methods": ["password"], "password": {"user": user}},
+                         "scope": {"project": project}}}
 
 
 class SelectelClient:
@@ -135,27 +197,7 @@ class SelectelClient:
     def _auth(self) -> None:
         import requests  # ленивый импорт: mock-режим работает без зависимостей
 
-        body = {
-            "auth": {
-                "identity": {
-                    "methods": ["password"],
-                    "password": {
-                        "user": {
-                            "name": self.cfg.username,
-                            "domain": {"name": self.cfg.account_id},
-                            "password": self.cfg.password,
-                        }
-                    },
-                },
-                "scope": {
-                    "project": {
-                        "name": self.cfg.project_name,
-                        "domain": {"name": self.cfg.account_id},
-                    }
-                },
-            }
-        }
-        r = requests.post(f"{IDENTITY_URL}/auth/tokens", json=body, timeout=30)
+        r = requests.post(f"{self.cfg.auth_url.rstrip('/')}/auth/tokens", json=self.cfg.auth_body(), timeout=30)
         if r.status_code >= 400:
             raise SelectelAPIError(r.status_code, f"Selectel auth failed ({r.status_code})")
         self.token = r.headers["X-Subject-Token"]  # токен приходит в заголовке
@@ -166,9 +208,12 @@ class SelectelClient:
         log.info("token ok, project=%s, compute=%s", self.project_id, self.compute_url)
 
     def _compute_endpoint(self, catalog: list[dict]) -> str:
+        return self._endpoint("compute", catalog)
+
+    def _endpoint(self, service_type: str, catalog: list[dict] | None = None) -> str:
         candidates: list[str] = []
-        for entry in catalog:
-            if entry.get("type") != "compute":
+        for entry in self.catalog if catalog is None else catalog:
+            if entry.get("type") != service_type:
                 continue
             for ep in entry.get("endpoints", []):
                 if self.cfg.region and ep.get("region") != self.cfg.region:
@@ -176,10 +221,10 @@ class SelectelClient:
                 if ep.get("url") and ep.get("interface") == "public":
                     candidates.append(ep["url"])
         if not candidates:
-            raise RuntimeError("Публичный compute endpoint для выбранного региона не найден в service catalog")
+            raise RuntimeError(f"Публичный {service_type} endpoint для выбранного региона не найден в service catalog")
         url = candidates[0]
         # у некоторых провайдеров в URL есть плейсхолдер проекта
-        return url.replace("{project_id}", self.project_id).replace("%(tenant_id)s", self.project_id)
+        return url.replace("{project_id}", self.project_id).replace("%(tenant_id)s", self.project_id).rstrip("/")
 
     def _request(self, method: str, path: str, **kw) -> dict:
         import requests
@@ -201,6 +246,44 @@ class SelectelClient:
 
     # --- discovery ------------------------------------------------------
 
+    def list_images(self, wanted: str = "") -> list[dict]:
+        """Glance v2; the obsolete Nova /images API is absent at 2.72."""
+        import requests
+        if not self.token:
+            self._auth()
+        for attempt in range(2):
+            base = self._endpoint("image")
+            if not base.endswith("/v2"):
+                base += "/v2"
+            response = requests.get(base + "/images", headers={"X-Auth-Token": self.token},
+                                    params={"limit": 100, **({"name": wanted} if wanted else {})}, timeout=30)
+            if response.status_code == 401 and attempt == 0:
+                self._auth()
+                continue
+            if response.status_code >= 400:
+                raise SelectelAPIError(response.status_code, f"Glance images -> {response.status_code}")
+            return response.json().get("images", [])
+        raise RuntimeError("Glance authorization failed")
+
+    def get_image(self, image_id: str) -> dict:
+        import requests
+        image_id = str(uuid.UUID(image_id))
+        if not self.token:
+            self._auth()
+        for attempt in range(2):
+            base = self._endpoint("image")
+            if not base.endswith("/v2"):
+                base += "/v2"
+            response = requests.get(base + "/images/" + image_id,
+                                    headers={"X-Auth-Token": self.token}, timeout=30)
+            if response.status_code == 401 and attempt == 0:
+                self._auth()
+                continue
+            if response.status_code >= 400:
+                raise SelectelAPIError(response.status_code, f"Glance image -> {response.status_code}")
+            return response.json()
+        raise RuntimeError("Glance authorization failed")
+
     def find_flavor(self, wanted: str = "") -> dict:
         """Выбрать GPU-флейвор: явный (id/имя) или первый GPU по объёму RAM."""
         data = self._request("GET", "/flavors/detail?limit=1000")
@@ -218,13 +301,20 @@ class SelectelClient:
 
     def find_image(self, wanted: str = "") -> dict:
         """Образ ОС: явный, либо GPU-образ, либо ubuntu."""
-        images = self._request("GET", "/images?limit=1000").get("images", [])
+        if wanted:
+            try:
+                uuid.UUID(wanted)
+            except ValueError:
+                pass
+            else:
+                return self.get_image(wanted)
+        images = self.list_images(wanted)
         if wanted:
             for im in images:
-                if im["id"] == wanted or wanted.lower() in im["name"].lower():
+                if im["id"] == wanted or wanted == im["name"]:
                     return im
             raise RuntimeError(f"образ '{wanted}' не найден — укажи SELECTEL_IMAGE")
-        active = [im for im in images if im.get("status") == "ACTIVE"]
+        active = [im for im in images if im.get("status", "").lower() == "active"]
         for im in active:
             if "gpu" in im["name"].lower():
                 return im
@@ -561,12 +651,12 @@ def main() -> int:
     if args.image:
         cfg.image = args.image
 
-    if not cfg.mock and not (cfg.account_id and cfg.username and cfg.password):
-        log.error(
-            "Нет креденшелов Selectel. Заполни SELECTEL_ACCOUNT_ID/USERNAME/PASSWORD "
-            "(шаблон в scripts/.env.example) или запусти с --mock"
-        )
-        return 2
+    if not cfg.mock:
+        try:
+            cfg.auth_body()
+        except ValueError as exc:
+            log.error("%s", exc)
+            return 2
 
     run_job(cfg, photo, Path(args.out), args.job_id)
     return 0

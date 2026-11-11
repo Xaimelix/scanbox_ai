@@ -42,6 +42,43 @@ X-Auth-Token: <project scoped token>
 `delete_on_termination=true`.
 Источник способа создания: [инструкция Selectel](https://docs.selectel.ru/cloud-servers/create/create-preemptible-server/).
 
+## Проверка из Python после загрузки RC-файла
+
+Скрипт поддерживает стандартный password/v3password RC: `OS_AUTH_URL`,
+`OS_USERNAME` или `OS_USER_ID`, `OS_PASSWORD`, домены пользователя/проекта,
+`OS_PROJECT_ID` или `OS_PROJECT_NAME`, `OS_REGION_NAME`.
+ID проекта имеет приоритет перед именем. Сам RC-файл Python не исполняет:
+сначала примените его в той же Bash/WSL-сессии.
+
+```bash
+source /path/to/rc.sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r scripts/requirements.txt
+python -m scripts.selectel_smoke --preflight
+```
+
+Для `--preflight` достаточно авторизации и региона из RC. Flavor, образ,
+сеть, security group и сегмент заранее выбирать не требуется. Режим получает
+токен, читает первую страницу серверов и флейворов (до 100 записей), возвращает
+JSON с `auth=ok`, `resources_created=false`. Нулевое число серверов — нормальный
+успешный результат. Токен и пароль в ответе отсутствуют.
+Вызовов создания VM, дисков и keypair в этом режиме нет.
+
+Если явно задан `SELECTEL_IMAGE`, дополнительно проверяется этот образ через
+Glance API v2; для этого нужны права чтения образов. Без `SELECTEL_IMAGE`
+проверка не обращается к Glance. Устаревший Nova `/images` не используется.
+
+Для проверки под RC убедитесь, что в окружении нет старых значений
+`SELECTEL_ACCOUNT_ID`, `SELECTEL_USERNAME`, `SELECTEL_PASSWORD`: непустые
+значения этих переменных выбирают прежнюю схему авторизации `SELECTEL_*`.
+У неё свой scope, который не смешивается с проектом из RC. `OS_CLOUD`/
+`clouds.yaml` и application credentials этим клиентом не поддерживаются.
+
+`--preflight` — ограничение действий скрипта; reader-роли ограничивают права
+на стороне провайдера. Только реальный `--smoke` проверяет выделение GPU и SSH
+и требует разрешений на изменение ресурсов.
+
 ## Тест без ML
 
 Чтобы сначала проверить сам сервис, добавлен `scripts/selectel_smoke.py`.
@@ -72,7 +109,7 @@ set +a
 # Без сети, без ресурсов; JSON будущего запроса:
 python3 -m scripts.selectel_smoke --plan
 
-# Реальная авторизация и чтение flavor/image, без создания ресурсов:
+# Реальная авторизация и чтение серверов/флейворов, без создания ресурсов:
 python3 -m scripts.selectel_smoke --preflight
 
 # Реальная аренда VM с GPU и последующее удаление:
@@ -83,10 +120,10 @@ python3 -m scripts.selectel_smoke --smoke --report /tmp/selectel-smoke.json
 
 | Переменная | Значение |
 | --- | --- |
-| `SELECTEL_ACCOUNT_ID` | Domain аккаунта для OpenStack |
-| `SELECTEL_USERNAME`, `SELECTEL_PASSWORD` | Учётные данные OpenStack project user |
+| `SELECTEL_ACCOUNT_ID` | Domain аккаунта для прежней схемы; при использовании RC не задавать |
+| `SELECTEL_USERNAME`, `SELECTEL_PASSWORD` | Прежняя схема авторизации; альтернатива — `OS_*` из RC |
 | `SELECTEL_PROJECT_NAME` | Проект Selectel |
-| `SELECTEL_REGION` | Регион endpoint, например `ru-7` |
+| `SELECTEL_REGION` | Регион endpoint для прежней схемы; при использовании RC — `OS_REGION_NAME` |
 | `SELECTEL_AVAILABILITY_ZONE` | Сегмент пула, например `ru-7a` |
 | `SELECTEL_FLAVOR` | Точно выбранный GPU flavor ID/имя; тест не выбирает дорогую конфигурацию автоматически |
 | `SELECTEL_IMAGE` | Образ с драйвером NVIDIA и SSH |
