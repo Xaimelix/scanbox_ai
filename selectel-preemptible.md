@@ -69,11 +69,25 @@ JSON с `auth=ok`, `resources_created=false`. Нулевое число серв
 Glance API v2; для этого нужны права чтения образов. Без `SELECTEL_IMAGE`
 проверка не обращается к Glance. Устаревший Nova `/images` не используется.
 
-Для проверки под RC убедитесь, что в окружении нет старых значений
-`SELECTEL_ACCOUNT_ID`, `SELECTEL_USERNAME`, `SELECTEL_PASSWORD`: непустые
-значения этих переменных выбирают прежнюю схему авторизации `SELECTEL_*`.
-У неё свой scope, который не смешивается с проектом из RC. `OS_CLOUD`/
+По умолчанию (`SELECTEL_AUTH_SOURCE=auto`) переменные RC `OS_*` имеют
+приоритет перед прежними `SELECTEL_*`, даже если в окружении остались
+старые имя пользователя или account ID. Можно явно задать
+`SELECTEL_AUTH_SOURCE=openstack` для RC или `selectel` для прежней схемы.
+Пароль, project и domain не смешиваются между схемами. `OS_CLOUD`/
 `clouds.yaml` и application credentials этим клиентом не поддерживаются.
+
+Для диагностики без сети и вывода значений/секретов:
+
+```bash
+uv run --with-requirements scripts/requirements.txt \
+  python -m scripts.selectel_smoke --check-env
+```
+
+Результат показывает выбранную схему и только `true/false` для наличия
+экспортированных переменных. `.env` не читается автоматически: используйте
+`set -a; source .env; set +a` или `uv run --env-file .env ...`.
+RC загружайте в той же shell-сессии до запуска. Переменные обычной shell,
+которые не экспортированы, Python не видит; между терминалами они не сохраняются.
 
 `--preflight` — ограничение действий скрипта; reader-роли ограничивают права
 на стороне провайдера. Только реальный `--smoke` проверяет выделение GPU и SSH

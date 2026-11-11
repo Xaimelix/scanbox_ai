@@ -1,5 +1,7 @@
 import json
+import io
 import os
+from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -9,7 +11,7 @@ from unittest.mock import Mock, patch
 from scripts.orchestrator import (
     Config, SelectelAPIError, SelectelClient, ServerPreempted, run_job,
 )
-from scripts.selectel_smoke import preflight, smoke, validate_config
+from scripts.selectel_smoke import main, preflight, smoke, validate_config
 
 
 def config(**kwargs):
@@ -141,11 +143,55 @@ class RcAuthTests(unittest.TestCase):
     def test_legacy_credentials_are_not_mixed_with_rc_scope(self):
         with patch.dict(os.environ, {**self.RC, "SELECTEL_USERNAME": "legacy-user",
                                     "SELECTEL_PASSWORD": "legacy-password",
-                                    "SELECTEL_ACCOUNT_ID": "legacy-domain"}, clear=True):
+                                    "SELECTEL_ACCOUNT_ID": "legacy-domain",
+                                    "SELECTEL_AUTH_SOURCE": "selectel"}, clear=True):
             cfg = Config.from_env()
         self.assertEqual(cfg.auth_source, "selectel")
         self.assertEqual(cfg.auth_body()["auth"]["scope"]["project"], {
             "name": "default", "domain": {"name": "legacy-domain"}})
+
+    def test_partial_legacy_env_does_not_override_rc(self):
+        with patch.dict(os.environ, {**self.RC, "SELECTEL_USERNAME": "leftover-user",
+                                    "SELECTEL_ACCOUNT_ID": "leftover-domain",
+                                    "SELECTEL_PASSWORD": ""}, clear=True):
+            cfg = Config.from_env()
+        self.assertEqual(cfg.auth_source, "openstack")
+        user = cfg.auth_body()["auth"]["identity"]["password"]["user"]
+        self.assertEqual(user["name"], "service-user")
+        self.assertEqual(user["password"], "test-password")
+
+    def test_incomplete_rc_does_not_borrow_legacy_password(self):
+        with patch.dict(os.environ, {**self.RC, "OS_PASSWORD": "",
+                                    "SELECTEL_PASSWORD": "other-identity-password"}, clear=True):
+            cfg = Config.from_env()
+        with self.assertRaisesRegex(ValueError, "OS_PASSWORD"):
+            cfg.auth_body()
+
+    def test_openstack_can_be_selected_without_exported_rc(self):
+        with patch.dict(os.environ, {"SELECTEL_AUTH_SOURCE": "openstack"}, clear=True):
+            cfg = Config.from_env()
+        with self.assertRaisesRegex(ValueError, "OS_PASSWORD"):
+            cfg.auth_body()
+
+    def test_invalid_auth_source_is_rejected(self):
+        with patch.dict(os.environ, {"SELECTEL_AUTH_SOURCE": "typo"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "SELECTEL_AUTH_SOURCE"):
+                Config.from_env()
+
+    def test_env_diagnostics_never_print_credentials_or_make_requests(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, self.RC, clear=True), \
+                patch("sys.argv", ["selectel_smoke", "--check-env"]), \
+                patch("requests.post") as post, patch("requests.get") as get, \
+                redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        data = json.loads(output.getvalue())
+        self.assertEqual(data["auth_source"], "openstack")
+        self.assertTrue(data["variables_present"]["OS_PASSWORD"])
+        self.assertNotIn("test-password", output.getvalue())
+        self.assertNotIn("service-user", output.getvalue())
+        post.assert_not_called()
+        get.assert_not_called()
 
     def test_missing_password_names_variable_without_exposing_other_values(self):
         with patch.dict(os.environ, {**self.RC, "OS_PASSWORD": ""}, clear=True):

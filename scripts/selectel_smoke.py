@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import time
 import uuid
@@ -153,13 +154,25 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--plan", action="store_true", help="JSON запроса без сети и создания VM")
+    mode.add_argument("--check-env", action="store_true", help="выбор авторизации и наличие переменных без значений и сети")
     mode.add_argument("--preflight", action="store_true", help="только auth и чтение серверов/флейворов")
     mode.add_argument("--smoke", action="store_true", help="создать платную VM, проверить GPU и удалить")
     parser.add_argument("--report", type=Path, default=Path("/tmp/selectel-smoke.json"))
     args = parser.parse_args()
-    cfg = Config.from_env()
+    try:
+        cfg = Config.from_env()
+    except ValueError as exc:
+        parser.exit(1, f"ValueError: {exc}\n")
     cfg.preemptible = True
     client = SelectelClient(cfg)
+    if args.check_env:
+        keys = ("OS_AUTH_URL", "OS_USERNAME", "OS_USER_ID", "OS_PASSWORD",
+                "OS_PROJECT_ID", "OS_PROJECT_NAME", "OS_REGION_NAME",
+                "SELECTEL_ACCOUNT_ID", "SELECTEL_USERNAME", "SELECTEL_PASSWORD")
+        print(json.dumps({"auth_source": cfg.auth_source,
+                          "variables_present": {key: bool(os.environ.get(key)) for key in keys},
+                          "resources_created": False}, ensure_ascii=False, indent=2))
+        return 0
     if args.plan:
         body = client.server_payload("scanbox-smoke-PLAN", cfg.flavor or "FLAVOR_ID",
                                      cfg.image or "IMAGE_ID", "EPHEMERAL_KEY_NAME", None)

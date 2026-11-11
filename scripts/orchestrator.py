@@ -127,11 +127,13 @@ class Config:
             network_id=os.environ.get("SELECTEL_NETWORK_ID", ""),
             security_group=os.environ.get("SELECTEL_SECURITY_GROUP", ""),
         )
-        # A sourced RC file is a complete auth configuration. Never combine its
-        # project/domain selectors with a different SELECTEL_* identity.
-        if not any(os.environ.get(key) for key in (
-            "SELECTEL_ACCOUNT_ID", "SELECTEL_USERNAME", "SELECTEL_PASSWORD")) and any(
-                os.environ.get(key) for key in ("OS_AUTH_URL", "OS_USERNAME", "OS_USER_ID")):
+        # Prefer the RC identity when present. A leftover SELECTEL_USERNAME must
+        # not switch away from RC or cause a cross-identity password fallback.
+        source = os.environ.get("SELECTEL_AUTH_SOURCE", "auto").strip().lower()
+        if source not in {"auto", "openstack", "selectel"}:
+            raise ValueError("SELECTEL_AUTH_SOURCE: допустимы auto, openstack, selectel")
+        has_rc = any(os.environ.get(key) for key in ("OS_AUTH_URL", "OS_USERNAME", "OS_USER_ID"))
+        if source == "openstack" or (source == "auto" and has_rc):
             cfg.auth_source = "openstack"
             cfg.auth_url = os.environ.get("OS_AUTH_URL", IDENTITY_URL).rstrip("/")
             cfg.username = os.environ.get("OS_USERNAME", "")
