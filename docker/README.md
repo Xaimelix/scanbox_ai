@@ -1,5 +1,7 @@
 # Docker для локального runner и GPU VM Selectel
 
+Пошаговая проверка от RC до очистки VM: [гайд](../selectel-test-guide.md).
+
 Есть два независимых Compose-файла:
 
 | Файл | Где запускать | Что делает |

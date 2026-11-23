@@ -35,6 +35,9 @@ cost estimate, and local tests. The existing Selectel demo remains available.
 
 ## Selectel preemptible GPU test
 
+Пошаговый гайд: [проверка работоспособности на Selectel](selectel-test-guide.md)
+— окружение, read-only проверки, сеть/SSH, платный smoke и контроль очистки.
+
 See [selectel-preemptible.md](selectel-preemptible.md) for Selectel preemptible
 VM support and a lifecycle smoke test: create, verify the tag/GPU, and delete
 the VM, boot volumes, and temporary keypair.
