@@ -110,6 +110,7 @@ class Config:
     auth_type: str = "v3password"
     worker_image: str = ""
     model_dir: str = "/opt/scanbox/models"
+    floating_network_id: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -131,6 +132,7 @@ class Config:
             security_group=os.environ.get("SELECTEL_SECURITY_GROUP", ""),
             worker_image=os.environ.get("SELECTEL_WORKER_IMAGE", ""),
             model_dir=os.environ.get("SELECTEL_MODEL_DIR", "/opt/scanbox/models"),
+            floating_network_id=os.environ.get("SELECTEL_FLOATING_NETWORK_ID", ""),
         )
         # Prefer the RC identity when present. A leftover SELECTEL_USERNAME must
         # not switch away from RC or cause a cross-identity password fallback.
@@ -590,7 +592,14 @@ def run_job(cfg: Config, photo: Path, out: Path, job_id: str) -> None:
     client = MockClient(cfg) if cfg.mock else SelectelClient(cfg)
     server_id: str | None = None
     key_name: str | None = None
+    neutron = None
+    floating_id = None
+    floating_creation_uncertain = False
     try:
+        if cfg.floating_network_id and not cfg.mock:
+            from scripts.selectel_network import NeutronClient
+            neutron = NeutronClient(client)
+            neutron.validate_topology(cfg.network_id, cfg.floating_network_id)
         flavor = client.find_flavor(cfg.flavor)
         image = client.find_image(cfg.image)
         log.info("flavor=%s, image=%s", flavor["name"], image["name"])
@@ -610,6 +619,17 @@ def run_job(cfg: Config, photo: Path, out: Path, job_id: str) -> None:
         )
         server_id = server["id"]
         ip = client.wait_active(server_id)
+        if neutron:
+            port_id, private_ip = neutron.server_port(server_id, cfg.network_id)
+            floating_creation_uncertain = True
+            floating = neutron.create_floating_ip(cfg.floating_network_id, port_id, private_ip,
+                                                   f"scanbox-{job_id}")
+            floating_id = floating["id"]
+            floating_creation_uncertain = False
+            ip = floating.get("floating_ip_address")
+            if not ip:
+                raise RuntimeError("Neutron не вернул адрес floating IP")
+            log.info("floating IP: id=%s server=%s", floating_id, server_id)
         status("ready", f"сервер {server_id} активен, ip={ip}")
 
         if cfg.mock:
@@ -625,6 +645,9 @@ def run_job(cfg: Config, photo: Path, out: Path, job_id: str) -> None:
 
         status("done", f"модель: {out}")
     except Exception as exc:
+        if floating_creation_uncertain:
+            log.error("Создание floating IP не подтверждено; перед повтором проверьте "
+                      "Neutron floating IP с description=scanbox-%s", job_id)
         status("failed", str(exc))
         if cfg.keep_on_error:
             log.warning(
@@ -633,12 +656,17 @@ def run_job(cfg: Config, photo: Path, out: Path, job_id: str) -> None:
         raise
     finally:
         try:
-            if server_id and not cfg.keep_on_error:
-                status("deleting", "удаляем сервер ...")
-                client.delete_server(server_id)
-                if not cfg.mock:
-                    client.wait_deleted(server_id)
-                status("deleted", "сервер удалён")
+            try:
+                if neutron and floating_id and not cfg.keep_on_error:
+                    neutron.delete_floating_ip(floating_id)
+                    neutron.wait_deleted(floating_id)
+            finally:
+                if server_id and not cfg.keep_on_error:
+                    status("deleting", "удаляем сервер ...")
+                    client.delete_server(server_id)
+                    if not cfg.mock:
+                        client.wait_deleted(server_id)
+                    status("deleted", "сервер удалён")
         finally:
             if key_name:
                 client.delete_keypair(key_name)

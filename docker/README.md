@@ -54,6 +54,11 @@ docker compose run --rm --entrypoint cat selectel /reports/smoke-1.json
 и бюджетом. Текущий `api/worker.py` обрабатывает очередь последовательно;
 нового общего планировщика параллельных GPU-задач этот Compose не добавляет.
 
+Для приватной сети с общим роутером добавьте в `.env`
+`SELECTEL_FLOATING_NETWORK_ID` — UUID внешней сети. Smoke и standalone
+оркестратор будут выделять временный floating IP для SSH и удалять свой IP
+при очистке; общий роутер сохраняется. [Подготовка сети](../selectel-network-setup.md).
+
 ## Одна SSH security group для нескольких VM
 
 Security group — сетевые правила, не SSH-ключ и не группа размещения серверов.

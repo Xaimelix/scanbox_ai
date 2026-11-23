@@ -15,6 +15,7 @@ import time
 import uuid
 
 from scripts.orchestrator import Config, SelectelClient, container_args, create_ephemeral_keypair
+from scripts.selectel_network import NeutronClient
 
 
 def gpu_probe(cfg, key, host, client, server_id):
@@ -56,6 +57,8 @@ def validate_config(cfg, require_credentials=True, require_resources=True):
     }
     if not require_resources:
         required = {"OS_REGION_NAME или SELECTEL_REGION": cfg.region}
+    if cfg.floating_network_id and cfg.network_id == cfg.floating_network_id:
+        raise ValueError("Приватная сеть VM и внешняя сеть floating IP должны отличаться")
     if require_credentials:
         cfg.auth_body()
     missing = [key for key, value in required.items() if not value]
@@ -78,6 +81,9 @@ def preflight(cfg, client):
     if cfg.image:
         image = client.find_image(cfg.image)
         result["image"] = {key: image.get(key) for key in ("id", "name", "status")}
+    if cfg.floating_network_id:
+        result["network"] = NeutronClient(client).validate_topology(
+            cfg.network_id, cfg.floating_network_id)
     return result
 
 
@@ -85,10 +91,15 @@ def smoke(cfg, report_path: Path, client=None, probe=gpu_probe):
     """Persist resource IDs before waiting; always attempt both cleanup steps."""
     cfg.preemptible = True
     client = client or SelectelClient(cfg)
+    neutron = NeutronClient(client) if cfg.floating_network_id else None
     name = "scanbox-smoke-" + uuid.uuid4().hex[:16]
     report = {"name": name, "status": "running", "preemptible": True,
               "server_id": None, "server_deleted": False, "cleanup_errors": [],
               "creation_uncertain": False}
+    if neutron:
+        report.update(floating_ip_id=None, floating_ip_address=None,
+                      floating_ip_deleted=False, floating_ip_creation_uncertain=False,
+                      floating_network_id=cfg.floating_network_id)
     started = time.monotonic()
     key_attempted = False
 
@@ -97,6 +108,8 @@ def smoke(cfg, report_path: Path, client=None, probe=gpu_probe):
 
     save()  # Fail before resource creation if the report cannot be written.
     try:
+        if neutron:
+            report["network"] = neutron.validate_topology(cfg.network_id, cfg.floating_network_id)
         flavor = client.find_flavor(cfg.flavor)
         image = client.find_image(cfg.image)
         key_attempted = True
@@ -118,12 +131,31 @@ def smoke(cfg, report_path: Path, client=None, probe=gpu_probe):
         save()
         if "preemptible" not in tags:
             raise RuntimeError("API не подтвердил тег preemptible — тест не пройден")
+        if neutron:
+            port_id, private_ip = neutron.server_port(server["id"], cfg.network_id)
+            report["floating_ip_creation_uncertain"] = True
+            save()
+            floating = neutron.create_floating_ip(cfg.floating_network_id, port_id, private_ip, name)
+            report["floating_ip_id"] = floating["id"]
+            report["floating_ip_address"] = floating.get("floating_ip_address")
+            report["floating_ip_creation_uncertain"] = False
+            save()
+            host = report["floating_ip_address"]
+            if not host:
+                raise RuntimeError("Neutron не вернул адрес floating IP")
         report["gpu"] = probe(cfg, key, host, client, server["id"])
         report["status"] = "passed"
     except Exception as exc:
         report["status"] = "failed"
         report["error"] = f"{type(exc).__name__}: {exc}"
     finally:
+        if neutron and report.get("floating_ip_id"):
+            try:
+                neutron.delete_floating_ip(report["floating_ip_id"])
+                neutron.wait_deleted(report["floating_ip_id"])
+                report["floating_ip_deleted"] = True
+            except Exception as exc:
+                report["cleanup_errors"].append(f"floating-ip: {type(exc).__name__}: {exc}")
         if report["server_id"]:
             try:
                 client.delete_server(report["server_id"])
@@ -145,7 +177,8 @@ def smoke(cfg, report_path: Path, client=None, probe=gpu_probe):
                     report["key_deleted"] = True
                 else:
                     report["cleanup_errors"].append(f"keypair: {type(exc).__name__}: {exc}")
-        if report["cleanup_errors"] or report["creation_uncertain"]:
+        if (report["cleanup_errors"] or report["creation_uncertain"] or
+                report.get("floating_ip_creation_uncertain")):
             report["status"] = "failed"
         report["elapsed_seconds"] = round(time.monotonic() - started, 2)
         save()
@@ -178,9 +211,12 @@ def main():
     if args.plan:
         body = client.server_payload("scanbox-smoke-PLAN", cfg.flavor or "FLAVOR_ID",
                                      cfg.image or "IMAGE_ID", "EPHEMERAL_KEY_NAME", None)
-        print(json.dumps({"method": "POST", "path": "/servers",
-                          "headers": {"OpenStack-API-Version": "compute 2.72"},
-                          "body": body}, ensure_ascii=False, indent=2))
+        plan = {"method": "POST", "path": "/servers",
+                "headers": {"OpenStack-API-Version": "compute 2.72"}, "body": body}
+        if cfg.floating_network_id:
+            plan["floating_ip"] = {"external_network_id": cfg.floating_network_id,
+                                   "allocate_after_vm": True, "delete_after_test": True}
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
         return 0
     try:
         if args.preflight:
